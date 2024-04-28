@@ -6,6 +6,8 @@
 #include <HTTPClient.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
 #include <vector>
 
 #define SS_PIN 33
@@ -40,6 +42,13 @@ String car_direction = "";
 // Wifi
 const char* ssid = "Roomies";
 const char* password = "utnd@27240803";
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+//MQTT
+const char* mqtt_username = "hivemq";
+const char* mqtt_password = "public";
+const char* broker = "broker.hivemq.com";
 
 // Time Synchronizing
 String current_time = "";
@@ -103,7 +112,7 @@ void setup() {
   Serial.println("-------------");
   Serial.println("WIFI mode : STA");
   WiFi.mode(WIFI_STA);
-  Serial.print("Connecting to :");
+  Serial.print("Connecting to : ");
   Serial.println(ssid);
   WiFi.begin(ssid, password);
 
@@ -140,6 +149,9 @@ void setup() {
   lcd.print(ssid);
   delay(1500);
 
+  client.setServer("broker.hivemq.com", 1883);
+  client.setCallback(callback);
+
   timeClient.begin();
   timeClient.setTimeOffset(gmtOffset_sec);
 
@@ -154,8 +166,15 @@ void setup() {
 
 // Main Loop Function
 void loop() {
+
   timeClient.update();
   current_time = timeClient.getFormattedTime();
+
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
+  delay(500);
 
   Read_IR_Sensor();
 
@@ -163,6 +182,7 @@ void loop() {
 
   if (digitalRead(ir_front) == 0) {
     if (car_direction == "leaving") {
+      MQTT_Publish("Ujjwal0901/m", "Thanks for using our service");
       delay(1000);
       myservo.write(90);
       car_direction = "";
@@ -190,6 +210,7 @@ void loop() {
       lcd.print("to avoid congestion");
       digitalWrite(red_led_pin, HIGH);
       digitalWrite(buzzer_pin, HIGH);
+      MQTT_Publish("Ujjwal0901/m", "Please park properly to avoid congestion");
       delay(1500);
       lcd.clear();
       digitalWrite(buzzer_pin, LOW);
@@ -207,6 +228,50 @@ void loop() {
 
 // Other functions definations
 
+void callback(char* topic, byte* message, unsigned int length) {
+  Serial.print("Message arrived on topic: ");
+  Serial.print(topic);
+  Serial.print(". Message: ");
+  String messageTemp = "";
+
+
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)message[i]);
+    messageTemp += (char)message[i];
+  }
+  Serial.println();
+
+  if (String(topic) == "Ujjwal0901/modes") {
+    if (messageTemp == "reg") {
+      modes = "reg";
+      Serial.println("Changing mode to registration mode");
+    } else if (messageTemp == "atc") {
+      modes = "atc";
+      Serial.println("Changing mode to atc mode");
+    }
+  }
+}
+
+void reconnect() {
+  if (!client.connected()) {
+    Serial.print("connecting to : ");
+    Serial.println(broker);
+    if (client.connect("Ujjwal0901", mqtt_username, mqtt_password)) {
+      Serial.print("connected to : ");
+      Serial.println(broker);
+      bool check = client.subscribe("Ujjwal0901/modes");
+    } else {
+      Serial.println("trying to connect...");
+      delay(1000);
+    }
+  }
+}
+
+void MQTT_Publish(char* topic, char* message) {
+  if (!client.connected()) reconnect();
+  uint16_t packetIdPub1 = client.publish(String(topic).c_str(), String(message).c_str(), true);
+}
+
 void rfid_scanning_func() {
   if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
 
@@ -220,6 +285,8 @@ void rfid_scanning_func() {
     cardID.replace(" ", "");
     Serial.print("Detected Card ID: ");
     Serial.println(cardID);
+    Serial.print("Modes : ");
+    Serial.println(modes);
 
     bool make_http_request = false;
 
@@ -233,7 +300,7 @@ void rfid_scanning_func() {
           numParkedCars++;
           make_http_request = true;
         } else {
-          carNotRegistered();
+          cardNotRegistered();
         }
       } else {
         slots_full();
@@ -272,6 +339,7 @@ void show_registration_msg() {
   lcd.print("Please tap your card");
   lcd.setCursor(2, 2);
   lcd.print("to register");
+  MQTT_Publish("Ujjwal0901/m", "Please tap your card to register");
 }
 
 void show_slot_on_lcd() {
@@ -293,11 +361,12 @@ void show_slot_on_lcd() {
 }
 
 void slots_full() {
-  Serial.println("Sorry parking full.");
+  Serial.println("Sorry parking full");
   digitalWrite(red_led_pin, true);
   digitalWrite(buzzer_pin, HIGH);
   lcd.clear();
   lcd.print("Sorry parking full");
+  MQTT_Publish("Ujjwal0901/m", "Sorry parking full.");
   delay(1000);
   lcd.clear();
   digitalWrite(buzzer_pin, LOW);
@@ -312,30 +381,37 @@ void Read_IR_Sensor() {
 
   if (digitalRead(ir_car1) == 0) {
     S1 = 1;
-  }
+    MQTT_Publish("Ujjwal0901/slot1", "Filled");
+  } else MQTT_Publish("Ujjwal0901/slot1", "Empty");
+
   if (digitalRead(ir_car2) == 0) {
     S2 = 1;
-  }
+    MQTT_Publish("Ujjwal0901/slot2", "Filled");
+  } else MQTT_Publish("Ujjwal0901/slot2", "Empty");
+
   if (digitalRead(ir_car3) == 0) {
     S3 = 1;
-  }
+    MQTT_Publish("Ujjwal0901/slot3", "Filled");
+  } else MQTT_Publish("Ujjwal0901/slot3", "Empty");
+
   if (digitalRead(ir_car4) == 0) {
     S4 = 1;
-  }
+    MQTT_Publish("Ujjwal0901/slot4", "Filled");
+  } else MQTT_Publish("Ujjwal0901/slot4", "Empty");
 
   emptySlots = MAX_PARKED_CARS - (S1 + S2 + S3 + S4);
 }
 
-void http_Req(String str_modes, String str_uid, String current_time) {
+void http_Req(String modes, String str_uid, String current_time) {
   if (WiFi.status() == WL_CONNECTED) {
     String http_req_url = "";
 
-    if (str_modes == "atc") {
+    if (modes == "atc") {
       http_req_url = Web_App_URL + "?sts=atc";
       http_req_url += "&uid=" + str_uid;
       http_req_url += "&time=" + current_time;
     }
-    if (str_modes == "reg") {
+    if (modes == "reg") {
       http_req_url = Web_App_URL + "?sts=reg";
       http_req_url += "&uid=" + str_uid;
       http_req_url += "&time=" + current_time;
@@ -367,7 +443,7 @@ void http_Req(String str_modes, String str_uid, String current_time) {
     String sts_Res = getValue(payload, ',', 0);
 
     if (sts_Res == "OK") {
-      if (str_modes == "atc") {
+      if (modes == "atc") {
         atc_Info = getValue(payload, ',', 1);
 
         if (atc_Info == "TI_Successful") {
@@ -385,7 +461,7 @@ void http_Req(String str_modes, String str_uid, String current_time) {
         atc_Time_Out = "";
       }
 
-      if (str_modes == "reg") {
+      if (modes == "reg") {
         reg_Info = getValue(payload, ',', 1);
 
         if (reg_Info == "R_Successful") {
@@ -447,25 +523,6 @@ bool isCardRegistered(String cardID) {
     }
   }
   return false;
-}
-
-void carNotRegistered() {
-  digitalWrite(red_led_pin, true);
-  digitalWrite(buzzer_pin, HIGH);
-  lcd.clear();
-  delay(500);
-  lcd.setCursor(6, 0);
-  lcd.print("Error !");
-  lcd.setCursor(3, 1);
-  lcd.print("Your card is not");
-  lcd.setCursor(6, 2);
-  lcd.print("registered");
-  delay(1000);
-  digitalWrite(buzzer_pin, LOW);
-  delay(1500);
-  digitalWrite(red_led_pin, false);
-  lcd.clear();
-  delay(500);
 }
 
 void carEntering(String payload) {
@@ -537,10 +594,11 @@ void cardNotRegistered() {
   delay(100);
   lcd.setCursor(6, 0);
   lcd.print("Error !");
-  lcd.setCursor(3, 2);
+  lcd.setCursor(3, 1);
   lcd.print("Your card is not");
-  lcd.setCursor(6, 3);
+  lcd.setCursor(6, 2);
   lcd.print("registered");
+  MQTT_Publish("Ujjwal0901/m", "Error! unregistered card");
   delay(1000);
   digitalWrite(buzzer_pin, LOW);
   delay(1500);
@@ -555,10 +613,11 @@ void registrationSuccessful() {
   delay(500);
   lcd.setCursor(0, 0);
   lcd.print("Your card has been");
-  lcd.setCursor(6, 2);
+  lcd.setCursor(6, 1);
   lcd.print("registered");
-  lcd.setCursor(5, 3);
+  lcd.setCursor(5, 2);
   lcd.print("successfully");
+  MQTT_Publish("Ujjwal0901/m", "Card registered successfully");
   delay(2500);
   lcd.clear();
   digitalWrite(green_led_pin, false);
@@ -572,10 +631,11 @@ void cardAlreadyRegistered() {
   delay(500);
   lcd.setCursor(6, 0);
   lcd.print("Error !");
-  lcd.setCursor(0, 2);
+  lcd.setCursor(0, 1);
   lcd.print("Your card is already");
-  lcd.setCursor(6, 3);
+  lcd.setCursor(6, 2);
   lcd.print("registered");
+  MQTT_Publish("Ujjwal0901/m", "Card already registered");
   delay(1000);
   digitalWrite(buzzer_pin, LOW);
   delay(1500);
